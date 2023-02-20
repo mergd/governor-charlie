@@ -7,7 +7,16 @@ import {ERC20} from "solmate/tokens/ERC20.sol";
 import "src/Kernel.sol";
 
 abstract contract VOTESv1 is Module, ERC4626 {
+    // =========  EVENTS ========= //
+    event DelegateChanged(
+        address indexed delegator,
+        address indexed currentDelegate,
+        address indexed delegatee
+    );
+    event DelegateVotesChanged(address delegatee, uint oldVotes, uint newVotes);
+
     // =========  STATE ========= //
+    mapping(address => address) public delegates;
 
     ERC20 public token;
 
@@ -34,5 +43,10 @@ abstract contract VOTESv1 is Module, ERC4626 {
 
     // =========  FUNCTIONS ========= //
 
-    // function resetActionTimestamp(address wallet_) external virtual;
+    function getCurrentVotes(address account) external virtual returns (uint);
+
+    function getPriorVotes(
+        address account,
+        uint blockNumber
+    ) public virtual returns (uint) {}
 }

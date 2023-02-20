@@ -32,7 +32,7 @@ contract VotingToken is VOTESv1 {
         override
         returns (uint8 major, uint8 minor)
     {
-        major = 2;
+        major = 1;
         minor = 0;
     }
 
@@ -44,7 +44,7 @@ contract VotingToken is VOTESv1 {
         uint256 assets_,
         address receiver_
     ) public override permissioned returns (uint256) {
-        _moveDelegates(address(0), receiver_, convertToShares(assets_));
+        _moveDelegates(address(0), receiver_, uint96(convertToShares(assets_)));
         return super.deposit(assets_, receiver_);
     }
 
@@ -52,8 +52,7 @@ contract VotingToken is VOTESv1 {
         uint256 shares_,
         address receiver_
     ) public override permissioned returns (uint256) {
-        _moveDelegates(address(0), receiver_, shares_);
-        lastDepositTimestamp[receiver_] = block.timestamp;
+        _moveDelegates(address(0), receiver_, uint96(shares_));
         return super.mint(shares_, receiver_);
     }
 
@@ -62,7 +61,7 @@ contract VotingToken is VOTESv1 {
         address receiver_,
         address owner_
     ) public override permissioned returns (uint256) {
-        _moveDelegates(owner_, address(0), convertToShares(assets_));
+        _moveDelegates(owner_, address(0), uint96(convertToShares(assets_)));
         return super.withdraw(assets_, receiver_, owner_);
     }
 
@@ -71,7 +70,7 @@ contract VotingToken is VOTESv1 {
         address receiver_,
         address owner_
     ) public override permissioned returns (uint256) {
-        _moveDelegates(owner_, address(0), shares_);
+        _moveDelegates(owner_, address(0), uint96(shares_));
         return super.redeem(shares_, receiver_, owner_);
     }
 
@@ -80,7 +79,7 @@ contract VotingToken is VOTESv1 {
         address to_,
         uint256 amt_
     ) public override permissioned returns (bool) {
-        _moveDelegates(msg.sender, to_, amt_);
+        _moveDelegates(msg.sender, to_, uint96(amt_));
         return super.transfer(to_, amt_);
     }
 
@@ -90,7 +89,7 @@ contract VotingToken is VOTESv1 {
         address to_,
         uint256 amount_
     ) public override permissioned returns (bool) {
-        _moveDelegates(from_, to_, amount_);
+        _moveDelegates(from_, to_, uint96(amount_));
         return super.transferFrom(from_, to_, amount_);
     }
 
@@ -126,7 +125,7 @@ contract VotingToken is VOTESv1 {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes(name)),
-                getChainId(),
+                block.chainid,
                 address(this)
             )
         );
@@ -157,7 +156,9 @@ contract VotingToken is VOTESv1 {
      * @param account The address to get votes balance
      * @return The number of current votes for `account`
      */
-    function getCurrentVotes(address account) external view returns (uint96) {
+    function getCurrentVotes(
+        address account
+    ) external view override returns (uint96) {
         uint32 nCheckpoints = numCheckpoints[account];
         return
             nCheckpoints > 0 ? checkpoints[account][nCheckpoints - 1].votes : 0;
@@ -173,7 +174,7 @@ contract VotingToken is VOTESv1 {
     function getPriorVotes(
         address account,
         uint blockNumber
-    ) public view returns (uint96) {
+    ) public view override returns (uint96) {
         require(
             blockNumber < block.number,
             "Comp::getPriorVotes: not yet determined"
@@ -212,7 +213,7 @@ contract VotingToken is VOTESv1 {
 
     function _delegate(address delegator, address delegatee) internal {
         address currentDelegate = delegates[delegator];
-        uint96 delegatorBalance = balances[delegator];
+        uint96 delegatorBalance = uint96(balanceOf[delegator]);
         delegates[delegator] = delegatee;
 
         emit DelegateChanged(delegator, currentDelegate, delegatee);
@@ -232,11 +233,7 @@ contract VotingToken is VOTESv1 {
                 uint96 srcRepOld = srcRepNum > 0
                     ? checkpoints[srcRep][srcRepNum - 1].votes
                     : 0;
-                uint96 srcRepNew = sub96(
-                    srcRepOld,
-                    amount,
-                    "Comp::_moveVotes: vote amount underflows"
-                );
+                uint96 srcRepNew = srcRepOld - amount;
                 _writeCheckpoint(srcRep, srcRepNum, srcRepOld, srcRepNew);
             }
 
@@ -246,11 +243,7 @@ contract VotingToken is VOTESv1 {
                 uint96 dstRepOld = dstRepNum > 0
                     ? checkpoints[dstRep][dstRepNum - 1].votes
                     : 0;
-                uint96 dstRepNew = add96(
-                    dstRepOld,
-                    amount,
-                    "Comp::_moveVotes: vote amount overflows"
-                );
+                uint96 dstRepNew = dstRepOld + amount;
                 _writeCheckpoint(dstRep, dstRepNum, dstRepOld, dstRepNew);
             }
         }
@@ -262,10 +255,7 @@ contract VotingToken is VOTESv1 {
         uint96 oldVotes,
         uint96 newVotes
     ) internal {
-        uint32 blockNumber = safe32(
-            block.number,
-            "Comp::_writeCheckpoint: block number exceeds 32 bits"
-        );
+        uint32 blockNumber = uint32(block.number);
 
         if (
             nCheckpoints > 0 &&
@@ -286,14 +276,6 @@ contract VotingToken is VOTESv1 {
     //============================================================================================//
     //                                       INTERNAL OVERRIDES                                       //
     //============================================================================================//
-
-    function getChainId() internal view returns (uint) {
-        uint256 chainId;
-        assembly {
-            chainId := chainid()
-        }
-        return chainId;
-    }
 
     //============================================================================================//
     //                                       VIEW FUNCTIONS                                       //

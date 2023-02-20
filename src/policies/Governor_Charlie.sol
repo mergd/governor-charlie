@@ -3,14 +3,14 @@ import {VotingToken} from "src/modules/VOTES/VotingToken.sol";
 import {VotesV1} from "src/modules/VOTES/Votes.V1.sol";
 import {Roles} from "src/modules/ROLES/ROLES.v1.sol";
 import {OlympusRoles} from "src/modules/Roles/OlympusRoles.sol";
-//import {INSTRv1} from "src/modules/INSTR/INSTR.v1.sol";
+import {INSTRv1} from "src/modules/INSTR/INSTR.v1.sol";
 import {BoardRoom} from "src/modules/BOARD/BoardRoom.sol";
 import {BoardV1} from "src/modules/BOARD/Board.V1.sol";
 
 import "src/kernel.sol";
 
 // Make votes for who the board is going to be, and then also designate proposals to be voted on by the board
-
+// Detemine board composition offchain, onchain ratifies results
 // Tokenholders can vote for board, and also vote on proposals such as enabling new perms for board
 // Boards reset every epoch
 // Board can take whatever action is necessary – board could even just be management, while the protocol is the core biz
@@ -53,29 +53,30 @@ contract GovernorCharlieDelegate is Policy {
     error ExecutionWindowExpired();
 
     // =========  STATE ========= //
+
+    struct ProposalMetadata {
+        address submitter;
+        uint256 submissionTimestamp;
+        uint256 collateralAmt;
+        uint256 activationTimestamp;
+        uint256 totalRegisteredVotes;
+        uint256 yesVotes;
+        uint256 noVotes;
+        bool isExecuted;
+        bool isCollateralReturned;
+        mapping(address => uint256) votesCastByUser;
+    }
+
+    /// @notice Return a proposal metadata object for a given proposal id.
+    mapping(uint256 => ProposalMetadata) public getProposalMetadata;
     /// @notice The name of this contract
     string public constant name = "Governor Charlie";
-
-    /// @notice The maximum number of members on the board
-    uint public constant BOARD_MAX = 10;
-
-    /// @notice The minimum setable proposal threshold
-    uint public constant MIN_PROPOSAL_THRESHOLD = 50000e18; // 50,000 Comp
-
-    /// @notice The maximum setable proposal threshold
-    uint public constant MAX_PROPOSAL_THRESHOLD = 100000e18; //100,000 Comp
 
     /// @notice The minimum setable voting period
     uint public constant MIN_VOTING_PERIOD = 5760; // About 24 hours
 
     /// @notice The max setable voting period
     uint public constant MAX_VOTING_PERIOD = 80640; // About 2 weeks
-
-    /// @notice The min setable voting delay
-    uint public constant MIN_VOTING_DELAY = 1;
-
-    /// @notice The max setable voting delay
-    uint public constant MAX_VOTING_DELAY = 40320; // About 1 week
 
     /// @notice The number of votes in support of a proposal required in order for a quorum to be reached and for a vote to succeed
     uint public constant quorumVotes = 400000e18; // 400,000 = 4% of Comp
@@ -94,6 +95,7 @@ contract GovernorCharlieDelegate is Policy {
         keccak256("Ballot(uint256 proposalId,uint8 support)");
 
     /**
+     * Done
      * @param kernel_ Address of the Kernel
      * @param values Eth values for proposal calls
      * @param signatures Function signatures for proposal calls
@@ -112,24 +114,21 @@ contract GovernorCharlieDelegate is Policy {
             timelock_ != address(0),
             "GovernorBravo::initialize: invalid timelock address"
         );
-        // Ideally token isn't already deployed and issued
+        // token can't already deployed and issued
         require(
             comp_ != address(0),
             "GovernorBravo::initialize: invalid comp address"
         );
         require(
-            votingPeriod_ >= MIN_VOTING_PERIOD &&
-                votingPeriod_ <= MAX_VOTING_PERIOD,
+            votingPeriod_ >= 1,
             "GovernorBravo::initialize: invalid voting period"
         );
         require(
-            votingDelay_ >= MIN_VOTING_DELAY &&
-                votingDelay_ <= MAX_VOTING_DELAY,
+            votingDelay_ >= 1,
             "GovernorBravo::initialize: invalid voting delay"
         );
         require(
-            proposalThreshold_ >= MIN_PROPOSAL_THRESHOLD &&
-                proposalThreshold_ <= MAX_PROPOSAL_THRESHOLD,
+            proposalThreshold_ >= 10000,
             "GovernorBravo::initialize: invalid proposal threshold"
         );
         comp = VotingToken(comp_);
@@ -160,12 +159,14 @@ contract GovernorCharlieDelegate is Policy {
         override
         returns (Keycode[] memory dependencies)
     {
-        dependencies = new Keycode[](2);
+        dependencies = new Keycode[](3);
         dependencies[0] = toKeycode("INSTR");
         dependencies[1] = toKeycode("VOTES");
+        // dependencies[2] = toKeycode("BOARD");
 
         INSTR = INSTRv1(getModuleAddress(dependencies[0]));
         VOTES = VOTESv1(getModuleAddress(dependencies[1]));
+        // BOARD = BOARDv1(getModuleAddress(dependencies[2]));
     }
 
     /**
@@ -186,7 +187,7 @@ contract GovernorCharlieDelegate is Policy {
         // Allow addresses above proposal threshold and whitelisted addresses to propose
         // Change
         require(
-            comp.getPriorVotes(msg.sender, sub256(block.number, 1)) >
+            comp.getPriorVotes(msg.sender, --block.number) >
                 proposalThreshold ||
                 isWhitelisted(msg.sender),
             "GovernorBravo::propose: proposer votes below proposal threshold"
@@ -199,12 +200,6 @@ contract GovernorCharlieDelegate is Policy {
             instructions.length <= proposalMaxOperations,
             "GovernorBravo::propose: too many actions"
         );
-        // transfer 5% of the total vote supply in VOTES (min 10 VOTES)
-        uint256 collateral = _max(
-            (VOTES.totalSupply() * COLLATERAL_REQUIREMENT) / 10_000,
-            COLLATERAL_MINIMUM
-        );
-        // VOTES.transferFrom(msg.sender, address(this), collateral);
 
         uint256 proposalId = INSTR.store(instructions_);
         ProposalMetadata storage proposal = getProposalMetadata[proposalId];
@@ -216,58 +211,6 @@ contract GovernorCharlieDelegate is Policy {
         VOTES.resetActionTimestamp(msg.sender);
 
         emit ProposalSubmitted(proposalId, title_, proposalURI_);
-    }
-
-    // reset board, allow for running
-    function runForBoard() external {}
-
-    function beginBoard() external {}
-
-    /**
-     * @notice Queues a proposal of state succeeded
-     * @param proposalId The id of the proposal to queue
-     */
-    function queue(uint proposalId) external {
-        require(
-            state(proposalId) == ProposalState.Succeeded,
-            "GovernorBravo::queue: proposal can only be queued if it is succeeded"
-        );
-        Proposal storage proposal = proposals[proposalId];
-        uint eta = add256(block.timestamp, timelock.delay());
-        for (uint i = 0; i < proposal.targets.length; i++) {
-            queueOrRevertInternal(
-                proposal.targets[i],
-                proposal.values[i],
-                proposal.signatures[i],
-                proposal.calldatas[i],
-                eta
-            );
-        }
-        proposal.eta = eta;
-        emit ProposalQueued(proposalId, eta);
-    }
-
-    /**
-     * @notice Executes a queued proposal if eta has passed
-     * @param proposalId The id of the proposal to execute
-     */
-    function execute(uint proposalId) external payable {
-        require(
-            state(proposalId) == ProposalState.Queued,
-            "GovernorBravo::execute: proposal can only be executed if it is queued"
-        );
-        Proposal storage proposal = proposals[proposalId];
-        proposal.executed = true;
-        for (uint i = 0; i < proposal.targets.length; i++) {
-            timelock.executeTransaction.value(proposal.values[i])(
-                proposal.targets[i],
-                proposal.values[i],
-                proposal.signatures[i],
-                proposal.calldatas[i],
-                proposal.eta
-            );
-        }
-        emit ProposalExecuted(proposalId);
     }
 
     /**
@@ -775,29 +718,5 @@ contract GovernorCharlieDelegate is Policy {
         VOTES.resetActionTimestamp(msg.sender);
 
         emit ProposalExecuted(proposalId_);
-    }
-
-    function reclaimCollateral(uint256 proposalId_) external {
-        ProposalMetadata storage proposal = getProposalMetadata[proposalId_];
-
-        if (
-            !proposal.isExecuted &&
-            block.timestamp < proposal.submissionTimestamp + COLLATERAL_DURATION
-        ) {
-            revert UnmetCollateralDuration();
-        }
-
-        if (proposal.isCollateralReturned) {
-            revert CollateralAlreadyReturned();
-        }
-
-        if (msg.sender != proposal.submitter) {
-            revert NotAuthorized();
-        }
-
-        proposal.isCollateralReturned = true;
-        VOTES.transfer(proposal.submitter, proposal.collateralAmt);
-
-        emit CollateralReclaimed(proposalId_, proposal.collateralAmt);
     }
 }
