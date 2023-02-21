@@ -13,6 +13,14 @@ abstract contract RolesConsumer {
         ROLES.requireRole(role_, msg.sender);
         _;
     }
+
+    function hasRole(bytes32 role_, address caller_) internal returns (bool) {
+        try ROLES.requireRole(role_, caller_) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
 }
 
 /// @notice Module that holds multisig roles needed by various policies.

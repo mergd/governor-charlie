@@ -14,7 +14,7 @@ import "src/kernel.sol";
 // Tokenholders can vote for board, and also vote on proposals such as enabling new perms for board
 // Boards reset every epoch
 // Board can take whatever action is necessary – board could even just be management, while the protocol is the core biz
-contract GovernorCharlieDelegate is Policy {
+contract GovernorCharlieDelegate is Policy, RolesConsumer {
     // =========  EVENTS ========= //
 
     event ProposalSubmitted(
@@ -23,25 +23,35 @@ contract GovernorCharlieDelegate is Policy {
         string proposalURI
     );
     event ProposalActivated(uint256 proposalId, uint256 timestamp);
-    event VotesCast(
+    event VoteCast(
         uint256 proposalId,
         address voter,
-        bool approve,
+        uint8 support,
         uint256 userVotes
     );
     event ProposalExecuted(uint256 proposalId);
-    event CollateralReclaimed(uint256 proposalId, uint256 tokensReclaimed_);
+    event ProposalCanceled(uint256 proposalId);
+
+    event ProposalThresholdSet(uint256 proposalThreshold);
+    event VotingDelaySet(uint256 votingDelay);
+    event VotingPeriodSet(uint256 votingPeriod);
 
     // =========  ERRORS ========= //
+    error setVotingPeriodInvalid();
+    error setVotingDelayInvalid();
+    error setProposalThresholdInvalid();
 
-    error NotAuthorized();
     error UnableToActivate();
     error ProposalAlreadyActivated();
 
-    error WarmupNotCompleted();
+    error SignatureNotValid();
     error UserAlreadyVoted();
     error UserHasNoVotes();
 
+    error ProposerAboveThreshold();
+    error ProposerWhitelisted();
+
+    error ProposerBelowThreshold();
     error ProposalIsNotActive();
     error DepositedAfterActivation();
     error PastVotingPeriod();
@@ -49,6 +59,7 @@ contract GovernorCharlieDelegate is Policy {
     error ExecutorNotSubmitter();
     error NotEnoughVotesToExecute();
     error ProposalAlreadyExecuted();
+    error ProposalAlreadyCanceled();
     error ExecutionTimelockStillActive();
     error ExecutionWindowExpired();
 
@@ -62,8 +73,9 @@ contract GovernorCharlieDelegate is Policy {
         uint256 totalRegisteredVotes;
         uint256 yesVotes;
         uint256 noVotes;
+        uint256 abstainVotes;
         bool isExecuted;
-        bool isCollateralReturned;
+        bool isCanceled;
         mapping(address => uint256) votesCastByUser;
     }
 
@@ -78,12 +90,6 @@ contract GovernorCharlieDelegate is Policy {
     /// @notice The max setable voting period
     uint public constant MAX_VOTING_PERIOD = 80640; // About 2 weeks
 
-    /// @notice The number of votes in support of a proposal required in order for a quorum to be reached and for a vote to succeed
-    uint public constant quorumVotes = 400000e18; // 400,000 = 4% of Comp
-
-    /// @notice The maximum number of actions that can be included in a proposal
-    uint public constant proposalMaxOperations = 10; // 10 actions
-
     /// @notice The EIP-712 typehash for the contract's domain
     bytes32 public constant DOMAIN_TYPEHASH =
         keccak256(
@@ -95,7 +101,6 @@ contract GovernorCharlieDelegate is Policy {
         keccak256("Ballot(uint256 proposalId,uint8 support)");
 
     /**
-     * Done
      * @param kernel_ Address of the Kernel
      * @param values Eth values for proposal calls
      * @param signatures Function signatures for proposal calls
@@ -104,33 +109,15 @@ contract GovernorCharlieDelegate is Policy {
      * @return Proposal id of new proposal
      */
     constructor(
+        address admin_,
         address kernel_,
         address comp_,
         uint votingPeriod_,
         uint votingDelay_,
         uint proposalThreshold_
     ) Policy(kernel_) {
-        require(
-            timelock_ != address(0),
-            "GovernorBravo::initialize: invalid timelock address"
-        );
-        // token can't already deployed and issued
-        require(
-            comp_ != address(0),
-            "GovernorBravo::initialize: invalid comp address"
-        );
-        require(
-            votingPeriod_ >= 1,
-            "GovernorBravo::initialize: invalid voting period"
-        );
-        require(
-            votingDelay_ >= 1,
-            "GovernorBravo::initialize: invalid voting delay"
-        );
-        require(
-            proposalThreshold_ >= 10000,
-            "GovernorBravo::initialize: invalid proposal threshold"
-        );
+        // Token should be the voting token
+        admin = admin_;
         comp = VotingToken(comp_);
         votingPeriod = votingPeriod_;
         votingDelay = votingDelay_;
@@ -145,7 +132,6 @@ contract GovernorCharlieDelegate is Policy {
     {
         requests = new Permissions[](4);
         requests[0] = Permissions(toKeycode("INSTR"), INSTR.store.selector);
-        // instr -> multiple instructions, kind of like sudo?
         requests[1] = Permissions(toKeycode("VOTES"), VOTES.delegate.selector);
         requests[2] = Permissions(toKeycode("VOTES"), VOTES.transfer.selector);
         requests[3] = Permissions(
@@ -177,8 +163,6 @@ contract GovernorCharlieDelegate is Policy {
      * @param description String description of the proposal
      * @return Proposal id of new proposal
      */
-    // todo: add more general instructions for extcalls – but what is key usecase?
-    // If it's an interaction that is internal to the contract, then it's a call
     function propose(
         Instruction[] calldata instructions,
         string calldata title,
@@ -189,17 +173,10 @@ contract GovernorCharlieDelegate is Policy {
         require(
             comp.getPriorVotes(msg.sender, --block.number) >
                 proposalThreshold ||
-                isWhitelisted(msg.sender),
-            "GovernorBravo::propose: proposer votes below proposal threshold"
+                hasRole("guardian", msg.sender),
+            ProposerBelowThreshold()
         );
-        require(
-            instructions.length != 0,
-            "GovernorBravo::propose: must provide actions"
-        );
-        require(
-            instructions.length <= proposalMaxOperations,
-            "GovernorBravo::propose: too many actions"
-        );
+        require(instructions.length != 0, UnableToActivate());
 
         uint256 proposalId = INSTR.store(instructions_);
         ProposalMetadata storage proposal = getProposalMetadata[proposalId];
@@ -207,8 +184,6 @@ contract GovernorCharlieDelegate is Policy {
         proposal.submitter = msg.sender;
         proposal.collateralAmt = collateral;
         proposal.submissionTimestamp = block.timestamp;
-
-        VOTES.resetActionTimestamp(msg.sender);
 
         emit ProposalSubmitted(proposalId, title_, proposalURI_);
     }
@@ -220,43 +195,30 @@ contract GovernorCharlieDelegate is Policy {
     function cancel(uint proposalId) external {
         require(
             state(proposalId) != ProposalState.Executed,
-            "GovernorBravo::cancel: cannot cancel executed proposal"
+            ProposalAlreadyActivated()
         );
 
-        Proposal storage proposal = proposals[proposalId];
+        ProposalMetadata storage proposal = getProposalMetadata[proposalId];
 
         // Proposer can cancel
         if (msg.sender != proposal.proposer) {
             // Whitelisted proposers can't be canceled for falling below proposal threshold
-            if (isWhitelisted(proposal.proposer)) {
+            if (hasRole("proposer", proposal.proposer)) {
                 require(
-                    (comp.getPriorVotes(
-                        proposal.proposer,
-                        sub256(block.number, 1)
-                    ) < proposalThreshold) && msg.sender == whitelistGuardian,
-                    "GovernorBravo::cancel: whitelisted proposer"
+                    (comp.getPriorVotes(proposal.proposer, --block.number) <
+                        proposalThreshold) && hasRole("guardian", msg.sender),
+                    ProposerWhitelisted()
                 );
             } else {
                 require(
-                    (comp.getPriorVotes(
-                        proposal.proposer,
-                        sub256(block.number, 1)
-                    ) < proposalThreshold),
-                    "GovernorBravo::cancel: proposer above threshold"
+                    (comp.getPriorVotes(proposal.proposer, --block.number) <
+                        proposalThreshold),
+                    ProposerAboveThreshold()
                 );
             }
         }
 
-        proposal.canceled = true;
-        for (uint i = 0; i < proposal.targets.length; i++) {
-            timelock.cancelTransaction(
-                proposal.targets[i],
-                proposal.values[i],
-                proposal.signatures[i],
-                proposal.calldatas[i],
-                proposal.eta
-            );
-        }
+        proposal.isCanceled = true;
 
         emit ProposalCanceled(proposalId);
     }
@@ -264,70 +226,12 @@ contract GovernorCharlieDelegate is Policy {
     /**
      * @notice Gets actions of a proposal
      * @param proposalId the id of the proposal
-     * @return Targets, values, signatures, and calldatas of the proposal actions
+     * @return Proposal Metadata
      */
     function getActions(
         uint proposalId
-    )
-        external
-        view
-        returns (
-            address[] memory targets,
-            uint[] memory values,
-            string[] memory signatures,
-            bytes[] memory calldatas
-        )
-    {
-        Proposal memory p = proposals[proposalId];
-        return (p.targets, p.values, p.signatures, p.calldatas);
-    }
-
-    /**
-     * @notice Gets the receipt for a voter on a given proposal
-     * @param proposalId the id of proposal
-     * @param voter The address of the voter
-     * @return The voting receipt
-     */
-    function getReceipt(
-        uint proposalId,
-        address voter
-    ) external view returns (Receipt memory) {
-        return proposals[proposalId].receipts[voter];
-    }
-
-    /**
-     * @notice Gets the state of a proposal
-     * @param proposalId The id of the proposal
-     * @return Proposal state
-     */
-    function state(uint proposalId) public view returns (ProposalState) {
-        require(
-            proposalCount >= proposalId && proposalId > initialProposalId,
-            "GovernorBravo::state: invalid proposal id"
-        );
-        Proposal storage proposal = proposals[proposalId];
-        if (proposal.canceled) {
-            return ProposalState.Canceled;
-        } else if (block.number <= proposal.startBlock) {
-            return ProposalState.Pending;
-        } else if (block.number <= proposal.endBlock) {
-            return ProposalState.Active;
-        } else if (
-            proposal.forVotes <= proposal.againstVotes ||
-            proposal.forVotes < quorumVotes
-        ) {
-            return ProposalState.Defeated;
-        } else if (proposal.eta == 0) {
-            return ProposalState.Succeeded;
-        } else if (proposal.executed) {
-            return ProposalState.Executed;
-        } else if (
-            block.timestamp >= add256(proposal.eta, timelock.GRACE_PERIOD())
-        ) {
-            return ProposalState.Expired;
-        } else {
-            return ProposalState.Queued;
-        }
+    ) external view returns (Instructions[] memory instructions) {
+        ProposalMetadata memory p = getProposalMetadata[proposalId];
     }
 
     /**
@@ -336,21 +240,6 @@ contract GovernorCharlieDelegate is Policy {
      * @param support The support value for the vote. 0=against, 1=for, 2=abstain
      */
     function castVote(uint proposalId, uint8 support) external {
-        emit VoteCast(
-            msg.sender,
-            proposalId,
-            support,
-            castVoteInternal(msg.sender, proposalId, support),
-            ""
-        );
-    }
-
-    /**
-     * @notice Cast a vote for a proposal
-     * @param proposalId The id of the proposal to vote on
-     * @param support The support value for the vote. 0=against, 1=for, 2=abstain
-     */
-    function castVote(address[] boardVotes, uint8 support) external {
         emit VoteCast(
             msg.sender,
             proposalId,
@@ -406,10 +295,7 @@ contract GovernorCharlieDelegate is Policy {
             abi.encodePacked("\x19\x01", domainSeparator, structHash)
         );
         address signatory = ecrecover(digest, v, r, s);
-        require(
-            signatory != address(0),
-            "GovernorBravo::castVoteBySig: invalid signature"
-        );
+        require(signatory != address(0), SignatureNotValid());
         emit VoteCast(
             signatory,
             proposalId,
@@ -420,70 +306,14 @@ contract GovernorCharlieDelegate is Policy {
     }
 
     /**
-     * @notice Internal function that caries out voting logic
-     * @param voter The voter that is casting their vote
-     * @param proposalId The id of the proposal to vote on
-     * @param support The support value for the vote. 0=against, 1=for, 2=abstain
-     * @return The number of votes cast
-     */
-    function castVoteInternal(
-        address voter,
-        uint proposalId,
-        uint8 support
-    ) internal returns (uint96) {
-        require(
-            state(proposalId) == ProposalState.Active,
-            "GovernorBravo::castVoteInternal: voting is closed"
-        );
-        require(
-            support <= 2,
-            "GovernorBravo::castVoteInternal: invalid vote type"
-        );
-        Proposal storage proposal = proposals[proposalId];
-        Receipt storage receipt = proposal.receipts[voter];
-        require(
-            receipt.hasVoted == false,
-            "GovernorBravo::castVoteInternal: voter already voted"
-        );
-        uint96 votes = comp.getPriorVotes(voter, proposal.startBlock);
-
-        if (support == 0) {
-            proposal.againstVotes = add256(proposal.againstVotes, votes);
-        } else if (support == 1) {
-            proposal.forVotes = add256(proposal.forVotes, votes);
-        } else if (support == 2) {
-            proposal.abstainVotes = add256(proposal.abstainVotes, votes);
-        }
-
-        receipt.hasVoted = true;
-        receipt.support = support;
-        receipt.votes = votes;
-
-        return votes;
-    }
-
-    /**
-     * @notice View function which returns if an account is whitelisted
-     * @param account Account to check white list status of
-     * @return If the account is whitelisted
-     */
-    function isWhitelisted(address account) public view returns (bool) {
-        return (whitelistAccountExpirations[account] > now);
-    }
-
-    /**
      * @notice Admin function for setting the voting delay
      * @param newVotingDelay new voting delay, in blocks
      */
-    function _setVotingDelay(uint newVotingDelay) external {
-        require(
-            msg.sender == admin,
-            "GovernorBravo::_setVotingDelay: admin only"
-        );
+    function _setVotingDelay(uint newVotingDelay) external onlyRole("admin") {
         require(
             newVotingDelay >= MIN_VOTING_DELAY &&
                 newVotingDelay <= MAX_VOTING_DELAY,
-            "GovernorBravo::_setVotingDelay: invalid voting delay"
+            setVotingDelayInvalid()
         );
         uint oldVotingDelay = votingDelay;
         votingDelay = newVotingDelay;
@@ -495,15 +325,11 @@ contract GovernorCharlieDelegate is Policy {
      * @notice Admin function for setting the voting period
      * @param newVotingPeriod new voting period, in blocks
      */
-    function _setVotingPeriod(uint newVotingPeriod) external {
-        require(
-            msg.sender == admin,
-            "GovernorBravo::_setVotingPeriod: admin only"
-        );
+    function _setVotingPeriod(uint newVotingPeriod) external onlyRole("admin") {
         require(
             newVotingPeriod >= MIN_VOTING_PERIOD &&
                 newVotingPeriod <= MAX_VOTING_PERIOD,
-            "GovernorBravo::_setVotingPeriod: invalid voting period"
+            setVotingDelayInvalid()
         );
         uint oldVotingPeriod = votingPeriod;
         votingPeriod = newVotingPeriod;
@@ -516,75 +342,18 @@ contract GovernorCharlieDelegate is Policy {
      * @dev newProposalThreshold must be greater than the hardcoded min
      * @param newProposalThreshold new proposal threshold
      */
-    function _setProposalThreshold(uint newProposalThreshold) external {
-        require(
-            msg.sender == admin,
-            "GovernorBravo::_setProposalThreshold: admin only"
-        );
+    function _setProposalThreshold(
+        uint newProposalThreshold
+    ) external onlyRole("admin") {
         require(
             newProposalThreshold >= MIN_PROPOSAL_THRESHOLD &&
                 newProposalThreshold <= MAX_PROPOSAL_THRESHOLD,
-            "GovernorBravo::_setProposalThreshold: invalid proposal threshold"
+            setProposalThresholdInvalid()
         );
         uint oldProposalThreshold = proposalThreshold;
         proposalThreshold = newProposalThreshold;
 
         emit ProposalThresholdSet(oldProposalThreshold, proposalThreshold);
-    }
-
-    /**
-     * @notice Admin function for setting the whitelist expiration as a timestamp for an account. Whitelist status allows accounts to propose without meeting threshold
-     * @param account Account address to set whitelist expiration for
-     * @param expiration Expiration for account whitelist status as timestamp (if now < expiration, whitelisted)
-     */
-    function _setWhitelistAccountExpiration(
-        address account,
-        uint expiration
-    ) external {
-        require(
-            msg.sender == admin || msg.sender == whitelistGuardian,
-            "GovernorBravo::_setWhitelistAccountExpiration: admin only"
-        );
-        whitelistAccountExpirations[account] = expiration;
-
-        emit WhitelistAccountExpirationSet(account, expiration);
-    }
-
-    /**
-     * @notice Admin function for setting the whitelistGuardian. WhitelistGuardian can cancel proposals from whitelisted addresses
-     * @param account Account to set whitelistGuardian to (0x0 to remove whitelistGuardian)
-     */
-    function _setWhitelistGuardian(address account) external {
-        require(
-            msg.sender == admin,
-            "GovernorBravo::_setWhitelistGuardian: admin only"
-        );
-        address oldGuardian = whitelistGuardian;
-        whitelistGuardian = account;
-
-        emit WhitelistGuardianSet(oldGuardian, whitelistGuardian);
-    }
-
-    /**
-     * @notice Begins transfer of admin rights. The newPendingAdmin must call `_acceptAdmin` to finalize the transfer.
-     * @dev Admin function to begin change of admin. The newPendingAdmin must call `_acceptAdmin` to finalize the transfer.
-     * @param newPendingAdmin New pending admin.
-     */
-    function _setPendingAdmin(address newPendingAdmin) external {
-        // Check caller = admin
-        require(
-            msg.sender == admin,
-            "GovernorBravo:_setPendingAdmin: admin only"
-        );
-
-        // Save current value, if any, for inclusion in log
-        address oldPendingAdmin = pendingAdmin;
-
-        // Store pendingAdmin with value newPendingAdmin
-        pendingAdmin = newPendingAdmin;
-
-        // Emit NewPendingAdmin(oldPendingAdmin, newPendingAdmin)
-        emit NewPendingAdmin(oldPendingAdmin, newPendingAdmin);
     }
 
     function getChainIdInternal() internal pure returns (uint) {
@@ -595,53 +364,19 @@ contract GovernorCharlieDelegate is Policy {
         return chainId;
     }
 
-    function activateProposal(uint256 proposalId_) external {
+    function castVoteInternal(
+        address voter,
+        uint256 proposalId_,
+        uint8 support
+    ) internal {
         ProposalMetadata storage proposal = getProposalMetadata[proposalId_];
 
-        if (msg.sender != proposal.submitter) {
-            revert NotAuthorized();
-        }
-
-        if (
-            block.timestamp <
-            proposal.submissionTimestamp + ACTIVATION_TIMELOCK ||
-            block.timestamp > proposal.submissionTimestamp + ACTIVATION_DEADLINE
-        ) {
-            revert UnableToActivate();
-        }
-
-        if (proposal.activationTimestamp != 0) {
-            revert ProposalAlreadyActivated();
-        }
-
-        proposal.activationTimestamp = block.timestamp;
-        proposal.totalRegisteredVotes = VOTES.totalSupply();
-
-        VOTES.resetActionTimestamp(msg.sender);
-
-        emit ProposalActivated(proposalId_, block.timestamp);
-    }
-
-    function vote(uint256 proposalId_, bool approve_) external {
-        ProposalMetadata storage proposal = getProposalMetadata[proposalId_];
-        uint256 userVotes = VOTES.balanceOf(msg.sender);
+        uint256 userVotes = uint256(
+            VOTES.getPriorVotes(msg.sender, proposal.activationTimestamp)
+        );
 
         if (proposal.activationTimestamp == 0) {
             revert ProposalIsNotActive();
-        }
-
-        if (
-            VOTES.lastDepositTimestamp(msg.sender) + WARMUP_PERIOD >
-            block.timestamp
-        ) {
-            revert WarmupNotCompleted();
-        }
-
-        if (
-            VOTES.lastDepositTimestamp(msg.sender) >
-            proposal.activationTimestamp
-        ) {
-            revert DepositedAfterActivation();
         }
 
         if (proposal.votesCastByUser[msg.sender] > 0) {
@@ -656,24 +391,25 @@ contract GovernorCharlieDelegate is Policy {
             revert PastVotingPeriod();
         }
 
-        if (approve_) {
-            proposal.yesVotes += userVotes;
-        } else {
-            proposal.noVotes += userVotes;
+        if (support == 0) {
+            proposal.noVotes += votes;
+        } else if (support == 1) {
+            proposal.yesVotes += votes;
+        } else if (support == 2) {
+            proposal.abstainVotes += votes;
         }
 
-        proposal.votesCastByUser[msg.sender] = userVotes;
-        VOTES.resetActionTimestamp(msg.sender);
+        proposal.votesCastByUser[voter] = userVotes;
 
-        emit VotesCast(proposalId_, msg.sender, approve_, userVotes);
+        emit VoteCast(proposalId_, voter, support, userVotes);
     }
 
     function executeProposal(uint256 proposalId_) external {
         ProposalMetadata storage proposal = getProposalMetadata[proposalId_];
 
-        // if (msg.sender != proposal.submitter) {
-        //     revert ExecutorNotSubmitter();
-        // }
+        if (msg.sender != proposal.submitter) {
+            revert ExecutorNotSubmitter();
+        }
 
         if (
             (proposal.yesVotes - proposal.noVotes) * 100 <
@@ -684,6 +420,10 @@ contract GovernorCharlieDelegate is Policy {
 
         if (proposal.isExecuted) {
             revert ProposalAlreadyExecuted();
+        }
+
+        if (proposal.isCanceled) {
+            revert ProposalAlreadyCanceled();
         }
 
         /// @dev    2 days after the voting period ends
@@ -714,8 +454,6 @@ contract GovernorCharlieDelegate is Policy {
                 ++step;
             }
         }
-
-        VOTES.resetActionTimestamp(msg.sender);
 
         emit ProposalExecuted(proposalId_);
     }
