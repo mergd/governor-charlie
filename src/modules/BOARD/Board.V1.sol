@@ -7,7 +7,9 @@ import "src/Kernel.sol";
 abstract contract Boardv1 is Module {
     // =========  EVENTS ========= //
 
-    event InstructionsStored(uint256 instructionsId);
+    event AddedOwner(address owner);
+    event RemovedOwner(address owner);
+    event ChangedThreshold(uint256 threshold);
 
     // =========  ERRORS ========= //
 
@@ -16,20 +18,32 @@ abstract contract Boardv1 is Module {
 
     // =========  STATE ========= //
 
-    /// @notice Safe address for the board
-    address public boardMultisig;
+    address internal constant SENTINEL_OWNERS = address(0x1);
 
-    /// @notice All stored instructions per count in totalInstructions
-    mapping(uint256 => Instruction[]) public storedInstructions;
+    mapping(address => address) internal owners;
+    uint256 internal ownerCount;
+    uint256 public threshold;
 
     // =========  FUNCTIONS ========= //
 
-    ///@notice Set members of the board
-    function setMembers(address[] calldata members_) external virtual;
+    function setBoard(
+        address[] memory _owners,
+        uint256 _threshold
+    ) external virtual;
 
-    ///@notice View members of the board
-    function getMembers() external virtual returns (address[] memory);
+    function addOwner(address owner, uint256 threshold) external virtual;
 
-    ///@notice Set the quorum of the board
-    function setQuorum(uint256 quorum_) external virtual;
+    function swapOwner(
+        address prevOwner,
+        address oldOwner,
+        address newOwner
+    ) external virtual;
+
+    function removeOwner(address owner, uint256 threshold) external virtual;
+
+    // =======  VIEW FUNCTIONS ======= //
+
+    function isOwner(address owner) external view virtual returns (bool);
+
+    function getOwners() external view virtual returns (address[] memory);
 }

@@ -2,11 +2,13 @@
 pragma solidity 0.8.15;
 
 import {ROLESv1} from "src/modules/ROLES/ROLES.v1.sol";
-import "./src/policies/Governor_Charlie.sol";
+import {BOARDv1} from "src/modules/BOARD/Board.v1.sol";
+import "src/policies/interfaces/ISafe.sol";
+import "src/policies/Governor_Charlie.sol";
 import "src/Kernel.sol";
 
-/// @notice The RolesAdmin Policy grants and revokes Roles in the ROLES module.
-contract RolesAdmin is Policy {
+/// @notice Controls roles in the roles admin
+contract Board is Policy {
     // =========  EVENTS ========= //
 
     event NewAdminPushed(address indexed newAdmin_);
