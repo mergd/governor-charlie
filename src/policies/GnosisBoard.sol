@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 pragma solidity >=0.7.0 <0.9.0;
 
-import "../external/Enum.sol";
 import "../external/ISignatureValidator.sol";
 import "../external/SignatureDecoder.sol";
+import "../external/Enum.sol";
+// import {SafeMath} from "./deps/SafeMath.sol";
+// import "./deps/SecuredTokenTransfer.sol";
 import "src/Kernel.sol";
-import {BoardV1} from "src/modules/Board/Board.V1.sol";
-
-// import "./dependencies/gnosis-safe/common/SignatureDecoder.sol";
-// import "./dependencies/gnosis-safe/interfaces/ISignatureValidator.sol";
+// import "./GuardManager.sol";
+import {BOARDv1} from "src/modules/BOARD/Board.V1.sol";
 
 interface GnosisSafe {
     /// @dev Allows a Module to execute a Safe transaction without any further confirmations.
@@ -24,8 +24,13 @@ interface GnosisSafe {
     ) external returns (bool success);
 }
 
-contract WeightModule is SignatureDecoder, Policy {
-    string public constant NAME = "Weight Module";
+contract ExecutorModule is
+    SignatureDecoder,
+    SecuredTokenTransfer
+{
+    using SafeMath for uint256;
+    string public constant NAME = "Gnosis Executor Policy";
+    string public constant VERSION = "1.0";
     // keccak256(
     //     "EIP712Domain(uint256 chainId,address verifyingContract)"
     // );
@@ -44,33 +49,19 @@ contract WeightModule is SignatureDecoder, Policy {
     event ExecutionSuccess(bytes32 txHash, uint256 payment);
 
     uint256 public nonce;
-    address public safe;
-    bytes32 private _deprecatedDomainSeparator;
+    address immutable safe;
+
+    bytes4 internal constant EIP1271_MAGIC_VALUE = 0x20c13b0b;
     // Mapping to keep track of all message hashes that have been approved by ALL REQUIRED owners
     mapping(bytes32 => uint256) public signedMessages;
     // Mapping to keep track of all hashes (message or transaction) that have been approved by ANY owners
     mapping(address => mapping(bytes32 => uint256)) public approvedHashes;
 
-    constructor(Kernel _kernel, address safe_) Policy(_kernel) {
+    // Set up the Gnosis Safe, add this module, and then transfer ownership to the Board
+    constructor(address safe_) {
+        setSafe(safe_);
         safe = safe_;
     }
-
-    function configureDependencies()
-        external
-        override
-        returns (Keycode[] memory dependencies)
-    {
-        dependencies = new Keycode[](1);
-        dependencies[0] = toKeycode("BOARD");
-
-        BOARD = Boardv1(getModuleAddress(dependencies[0]));
-    }
-
-    function getPermissions()
-        external
-        override
-        returns (Keycode[] memory permissions)
-    {}
 
     /// @dev Allows to execute a Safe transaction confirmed by required number of owners and then pays the account that submitted the transaction.
     ///      Note: The fees are always transferred, even if the user transaction fails.
@@ -117,24 +108,56 @@ contract WeightModule is SignatureDecoder, Policy {
             // Increase nonce and execute transaction.
             nonce++;
             txHash = keccak256(txHashData);
-            checkNSignatures(
-                txHash,
-                txHashData,
-                signatures,
-                BOARD.getThreshold()
-            );
+            checkNSignatures(txHash, txHashData, signatures, getThreshold());
         }
-
+        address guard = getGuard();
+        {
+            if (guard != address(0)) {
+                Guard(guard).checkTransaction(
+                    // Transaction info
+                    to,
+                    value,
+                    data,
+                    operation,
+                    safeTxGas,
+                    // Payment info
+                    baseGas,
+                    gasPrice,
+                    gasToken,
+                    refundReceiver,
+                    // Signature info
+                    signatures,
+                    msg.sender
+                );
+            }
+        }
+        // We require some gas to emit the events (at least 2500) after the execution and some to perform code until the execution (500)
+        // We also include the 1/64 in the check that is not send along with a call to counteract potential shortings because of EIP-150
         require(
-            GnosisSafe(safe).execTransactionFromModule(
+            gasleft() >= ((safeTxGas * 64) / 63).max(safeTxGas + 2500) + 500,
+            "GS010"
+        );
+        // Use scope here to limit variable lifetime and prevent `stack too deep` errors
+        {
+            // Removed gasprice check
+            success = GnosisSafe(safe).execTransactionFromModule(
                 to,
                 value,
                 data,
                 operation
-            ),
-            "Could not execute token transfer"
-        );
-        return true;
+            );
+            // If no safeTxGas and no gasPrice was set (e.g. both are 0), then the internal tx is required to be successful
+            // This makes it possible to use `estimateGas` without issues, as it searches for the minimum gas where the tx doesn't revert
+            require(success || safeTxGas != 0 || gasPrice != 0, "GS013");
+
+            if (success) emit ExecutionSuccess(txHash, 0);
+            else emit ExecutionFailure(txHash, 0);
+        }
+        {
+            if (guard != address(0)) {
+                Guard(guard).checkAfterExecution(txHash, success);
+            }
+        }
     }
 
     function domainSeparator() public view returns (bytes32) {
@@ -337,7 +360,9 @@ contract WeightModule is SignatureDecoder, Policy {
             }
 
             require(
-                currentOwner > lastOwner && BOARD.isOwner(currentOwner),
+                currentOwner > lastOwner &&
+                    owners[currentOwner] != address(0) &&
+                    currentOwner != SENTINEL_OWNERS,
                 "GS026"
             );
             lastOwner = currentOwner;

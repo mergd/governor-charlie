@@ -1,95 +1,94 @@
 //SPDX-License-Identifier: MIT
-import {Boardv1} from "src/modules/BOARD/Board.V1.sol";
-// import {Boardv1} from "src/modules/BOARD/Board.V1.sol";
+import {BOARDv1} from "src/modules/BOARD/Board.V1.sol";
 import "src/Kernel.sol";
 pragma solidity 0.8.15;
 
-contract BoardRoom is Boardv1 {
+contract BoardRoom is BOARDv1 {
     constructor(Kernel kernel_) Module(kernel_) {}
 
     /**
      * @notice Sets board
-     * @param _owners List of Safe owners.
+     * @param _members List of Safe owners.
      * @param _threshold Number of required confirmations for a Safe transaction.
      */
     function setBoard(
-        address[] memory _owners,
+        address[] memory _members,
         uint256 _threshold
     ) external override permissioned {
         // Validate that threshold is smaller than number of added owners.
-        require(_threshold <= _owners.length, "GS201");
+        require(_threshold <= _members.length, "GS201");
         // There has to be at least one Safe owner.
         require(_threshold >= 1, "GS202");
         // Initializing Safe owners.
-        address currentOwner = SENTINEL_OWNERS;
-        for (uint256 i = 0; i < _owners.length; i++) {
+        address currentMember = SENTINEL_MEMBERS;
+        for (uint256 i = 0; i < _members.length; i++) {
             // Owner address cannot be null.
-            address owner = _owners[i];
+            address member = _members[i];
             require(
-                owner != address(0) &&
-                    owner != SENTINEL_OWNERS &&
-                    owner != address(this) &&
-                    currentOwner != owner,
+                member != address(0) &&
+                    member != SENTINEL_MEMBERS &&
+                    member != address(this) &&
+                    currentMember != member,
                 "GS203"
             );
-            // No duplicate owners allowed.
-            require(owners[owner] == address(0), "GS204");
-            owners[currentOwner] = owner;
-            currentOwner = owner;
+            // No duplicate members allowed.
+            require(members[member] == address(0), "GS204");
+            members[currentMember] = member;
+            currentMember = member;
         }
-        owners[currentOwner] = SENTINEL_OWNERS;
-        ownerCount = _owners.length;
+        members[currentMember] = SENTINEL_MEMBERS;
+        memberCount = _members.length;
         threshold = _threshold;
     }
 
     /**
-     * @notice Adds the owner `owner` to the Safe and updates the threshold to `_threshold`.
+     * @notice Adds the member `member` to the Safe and updates the threshold to `_threshold`.
      * @dev This can only be done via a Safe transaction.
-     * @param owner New owner address.
+     * @param member New member address.
      * @param _threshold New threshold.
      */
-    function addOwnerWithThreshold(
-        address owner,
+    function addMemberWithThreshold(
+        address member,
         uint256 _threshold
-    ) external permissioned {
-        // Owner address cannot be null, the sentinel or the Safe itself.
+    ) external override permissioned {
+        // member address cannot be null, the sentinel or the Safe itself.
         require(
-            owner != address(0) &&
-                owner != SENTINEL_OWNERS &&
-                owner != address(this),
+            member != address(0) &&
+                member != SENTINEL_MEMBERS &&
+                member != address(this),
             "GS203"
         );
-        // No duplicate owners allowed.
-        require(owners[owner] == address(0), "GS204");
-        owners[owner] = owners[SENTINEL_OWNERS];
-        owners[SENTINEL_OWNERS] = owner;
-        ownerCount++;
-        emit AddedOwner(owner);
+        // No duplicate members allowed.
+        require(members[member] == address(0), "GS204");
+        members[member] = members[SENTINEL_MEMBERS];
+        members[SENTINEL_MEMBERS] = member;
+        memberCount++;
+        emit AddedMember(member);
         // Change threshold if threshold was changed.
         if (threshold != _threshold) changeThreshold(_threshold);
     }
 
     /**
-     * @notice Removes the owner `owner` from the Safe and updates the threshold to `_threshold`.
+     * @notice Removes the member `member` from the Safe and updates the threshold to `_threshold`.
      * @dev This can only be done via a Safe transaction.
-     * @param prevOwner Owner that pointed to the owner to be removed in the linked list
-     * @param owner Owner address to be removed.
+     * @param prevmember member that pointed to the member to be removed in the linked list
+     * @param member member address to be removed.
      * @param _threshold New threshold.
      */
-    function removeOwner(
-        address prevOwner,
-        address owner,
+    function removeMember(
+        address prevmember,
+        address member,
         uint256 _threshold
-    ) external permissioned {
-        // Only allow to remove an owner, if threshold can still be reached.
-        require(ownerCount - 1 >= _threshold, "GS201");
-        // Validate owner address and check that it corresponds to owner index.
-        require(owner != address(0) && owner != SENTINEL_OWNERS, "GS203");
-        require(owners[prevOwner] == owner, "GS205");
-        owners[prevOwner] = owners[owner];
-        owners[owner] = address(0);
-        ownerCount--;
-        emit RemovedOwner(owner);
+    ) external override permissioned {
+        // Only allow to remove an member, if threshold can still be reached.
+        require(memberCount - 1 >= _threshold, "GS201");
+        // Validate member address and check that it corresponds to member index.
+        require(member != address(0) && member != SENTINEL_MEMBERS, "GS203");
+        require(members[prevmember] == member, "GS205");
+        members[prevmember] = members[member];
+        members[member] = address(0);
+        memberCount--;
+        emit RemovedMember(member);
         // Change threshold if threshold was changed.
         if (threshold != _threshold) changeThreshold(_threshold);
     }
@@ -101,7 +100,7 @@ contract BoardRoom is Boardv1 {
      * @param oldOwner Owner address to be replaced.
      * @param newOwner New owner address.
      */
-    function swapOwner(
+    function swapMember(
         address prevOwner,
         address oldOwner,
         address newOwner
@@ -109,20 +108,23 @@ contract BoardRoom is Boardv1 {
         // Owner address cannot be null, the sentinel or the Safe itself.
         require(
             newOwner != address(0) &&
-                newOwner != SENTINEL_OWNERS &&
+                newOwner != SENTINEL_MEMBERS &&
                 newOwner != address(this),
             "GS203"
         );
         // No duplicate owners allowed.
-        require(owners[newOwner] == address(0), "GS204");
+        require(members[newOwner] == address(0), "GS204");
         // Validate oldOwner address and check that it corresponds to owner index.
-        require(oldOwner != address(0) && oldOwner != SENTINEL_OWNERS, "GS203");
-        require(owners[prevOwner] == oldOwner, "GS205");
-        owners[newOwner] = owners[oldOwner];
-        owners[prevOwner] = newOwner;
-        owners[oldOwner] = address(0);
-        emit RemovedOwner(oldOwner);
-        emit AddedOwner(newOwner);
+        require(
+            oldOwner != address(0) && oldOwner != SENTINEL_MEMBERS,
+            "GS203"
+        );
+        require(members[prevOwner] == oldOwner, "GS205");
+        members[newOwner] = members[oldOwner];
+        members[prevOwner] = newOwner;
+        members[oldOwner] = address(0);
+        emit RemovedMember(oldOwner);
+        emit AddedMember(newOwner);
     }
 
     /**
@@ -132,7 +134,7 @@ contract BoardRoom is Boardv1 {
      */
     function changeThreshold(uint256 _threshold) internal {
         // Validate that threshold is smaller than number of owners.
-        require(_threshold <= ownerCount, "GS201");
+        require(_threshold <= memberCount, "GS201");
         // There has to be at least one Safe owner.
         require(_threshold >= 1, "GS202");
         threshold = _threshold;
@@ -140,40 +142,36 @@ contract BoardRoom is Boardv1 {
     }
 
     /**
-     * @notice Returns the number of required confirmations for a Safe transaction aka the threshold.
-     * @return Threshold number.
-     */
-    function getThreshold() public view returns (uint256) {
-        return threshold;
-    }
-
-    /**
      * @notice Returns if `owner` is an owner of the Safe.
      * @return Boolean if owner is an owner of the Safe.
      */
-    function isOwner(address owner) public view override returns (bool) {
-        return owner != SENTINEL_OWNERS && owners[owner] != address(0);
+    function isMember(address member) public view override returns (bool) {
+        return member != SENTINEL_MEMBERS && members[member] != address(0);
     }
 
     /**
      * @notice Returns a list of Safe owners.
      * @return Array of Safe owners.
      */
-    function getOwners() public view override returns (address[] memory) {
-        address[] memory array = new address[](ownerCount);
+    function getMembers() public view override returns (address[] memory) {
+        address[] memory array = new address[](memberCount);
 
         // populate return array
         uint256 index = 0;
-        address currentOwner = owners[SENTINEL_OWNERS];
-        while (currentOwner != SENTINEL_OWNERS) {
-            array[index] = currentOwner;
-            currentOwner = owners[currentOwner];
+        address currentMember = members[SENTINEL_MEMBERS];
+        while (currentMember != SENTINEL_MEMBERS) {
+            array[index] = currentMember;
+            currentMember = members[currentMember];
             index++;
         }
         return array;
     }
 
-    function getThreshold() external view returns (uint256) {
+    /**
+     * @notice Returns the number of required confirmations for a Safe transaction aka the threshold.
+     * @return Threshold number.
+     */
+    function getThreshold() public view override returns (uint256) {
         return threshold;
     }
 }
