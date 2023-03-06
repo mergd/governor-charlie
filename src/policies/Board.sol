@@ -33,8 +33,8 @@ contract Board is Policy {
     //                                      POLICY SETUP                                          //
     //============================================================================================//
 
-    constructor(Kernel _kernel) Policy(_kernel) {
-        admin = msg.sender;
+    constructor(Kernel _kernel, address governance_) Policy(_kernel) {
+        admin = governance_;
     }
 
     function configureDependencies()
@@ -64,6 +64,9 @@ contract Board is Policy {
     //============================================================================================//
     //                                       CORE FUNCTIONS                                       //
     //============================================================================================//
+    function createBoard() external {
+        // create board
+    }
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert OnlyAdmin();

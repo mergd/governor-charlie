@@ -1,11 +1,10 @@
 pragma solidity ^0.8.15;
 import {VotingToken} from "src/modules/VOTES/VotingToken.sol";
-import {VotesV1} from "src/modules/VOTES/Votes.V1.sol";
-import {Roles} from "src/modules/ROLES/ROLES.v1.sol";
-import {OlympusRoles} from "src/modules/Roles/OlympusRoles.sol";
-import {INSTRv1} from "src/modules/INSTR/INSTR.v1.sol";
+import {VOTESv1} from "src/modules/VOTES/Votes.V1.sol";
+import {RolesConsumer} from "src/modules/Roles/OlympusRoles.sol";
+import {INSTRv1} from "src/modules/INSTR/Instr.v1.sol";
 import {BoardRoom} from "src/modules/BOARD/BoardRoom.sol";
-import {BoardV1} from "src/modules/BOARD/Board.V1.sol";
+import {BOARDv1} from "src/modules/BOARD/Board.V1.sol";
 
 import "src/kernel.sol";
 
